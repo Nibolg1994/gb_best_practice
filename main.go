@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -35,44 +36,44 @@ func (fi fileInfo) Path() string {
 }
 
 //Ограничить глубину поиска заданым числом, по SIGUSR2 увеличить глубину поиска на +2
-func ListDirectory(ctx context.Context, dir string) ([]FileInfo, error) {
+func ListDirectory(cancelCtx context.Context, userChan chan struct{}, dir string, depth int) ([]FileInfo, error) {
 	select {
-	case <-ctx.Done():
+	case <-cancelCtx.Done():
 		return nil, nil
-	default:
-		//По SIGUSR1 вывести текущую директорию и текущую глубину поиска
-		time.Sleep(time.Second * 10)
-		var result []FileInfo
-		res, err := os.ReadDir(dir)
-		if err != nil {
-			return nil, err
-		}
-		for _, entry := range res {
-			path := filepath.Join(dir, entry.Name())
-			if entry.IsDir() {
-				child, err := ListDirectory(ctx, path) //Дополнительно: вынести в горутину
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, child...)
-			} else {
-				info, err := entry.Info()
-				if err != nil {
-					return nil, err
-				}
-				result = append(result, fileInfo{info, path})
-			}
-		}
-		return result, nil
+	case <-userChan:
+		fmt.Println(dir)
+		fmt.Println(depth)
 	}
+
+	//По SIGUSR1 вывести текущую директорию и текущую глубину поиска
+	time.Sleep(time.Second * 10)
+	var result []FileInfo
+	res, err := ioutil.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range res {
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			depth++
+			child, err := ListDirectory(cancelCtx, userChan, path, depth) //Дополнительно: вынести в горутину
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, child...)
+		} else {
+			result = append(result, fileInfo{entry, path})
+		}
+	}
+	return result, nil
 }
 
-func FindFiles(ctx context.Context, ext string) (FileList, error) {
+func FindFiles(cancelCtx context.Context, userChan chan struct{}, ext string) (FileList, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}
-	files, err := ListDirectory(ctx, wd)
+	files, err := ListDirectory(cancelCtx, userChan, wd, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -94,12 +95,15 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	sigCh := make(chan os.Signal, 1)
+	sigUserCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigUserCh, syscall.SIGUSR1)
 
 	//Обработать сигнал SIGUSR1
 	waitCh := make(chan struct{})
+	userCh := make(chan struct{})
 	go func() {
-		res, err := FindFiles(ctx, wantExt)
+		res, err := FindFiles(ctx, userCh, wantExt)
 		if err != nil {
 			log.Printf("Error on search: %v\n", err)
 			os.Exit(1)
@@ -110,9 +114,13 @@ func main() {
 		waitCh <- struct{}{}
 	}()
 	go func() {
-		<-sigCh
-		log.Println("Signal received, terminate...")
-		cancel()
+		select {
+		case <-sigCh:
+			log.Println("Signal received, terminate...")
+			cancel()
+		case <-sigUserCh:
+			userCh <- struct{}{}
+		}
 	}()
 	//Дополнительно: Ожидание всех горутин перед завершением
 	<-waitCh
