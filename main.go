@@ -10,8 +10,12 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 type TargetFile struct {
@@ -35,8 +39,25 @@ func (fi fileInfo) Path() string {
 	return fi.path
 }
 
+func GetLogger() *zap.Logger {
+	config := zap.NewProductionConfig()
+	config.OutputPaths = []string{"stdout"}
+	config.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	logger, _ := config.Build()
+	logger = logger.With(zap.String("goos", runtime.GOOS))
+	return logger
+}
+
 //Ограничить глубину поиска заданым числом, по SIGUSR2 увеличить глубину поиска на +2
 func ListDirectory(cancelCtx context.Context, userChan chan struct{}, dir string, depth int) ([]FileInfo, error) {
+	logger := GetLogger()
+	defer logger.Sync()
+
+	logger.With(
+		zap.String("time", time.Now().String()),
+		zap.String("dir", dir),
+	).Debug("ListDirectory, call")
+
 	select {
 	case <-cancelCtx.Done():
 		return nil, nil
@@ -69,7 +90,15 @@ func ListDirectory(cancelCtx context.Context, userChan chan struct{}, dir string
 }
 
 func FindFiles(cancelCtx context.Context, userChan chan struct{}, ext string) (FileList, error) {
+	logger := GetLogger()
+	defer logger.Sync()
+
 	wd, err := os.Getwd()
+	logger.With(
+		zap.String("time", time.Now().String()),
+		zap.String("dir", wd),
+	).Debug("FindFiles, call")
+
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +119,9 @@ func FindFiles(cancelCtx context.Context, userChan chan struct{}, ext string) (F
 }
 
 func main() {
+	logger := GetLogger()
+	defer logger.Sync()
+
 	const wantExt = ".go"
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -105,8 +137,7 @@ func main() {
 	go func() {
 		res, err := FindFiles(ctx, userCh, wantExt)
 		if err != nil {
-			log.Printf("Error on search: %v\n", err)
-			os.Exit(1)
+			logger.Fatal(err.Error())
 		}
 		for _, f := range res {
 			fmt.Printf("\tName: %s\t\t Path: %s\n", f.Name, f.Path)
