@@ -1,15 +1,15 @@
 package main
 
 //Исходники задания для первого занятия у других групп https://github.com/t0pep0/GB_best_go
-
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
-	"log"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -35,45 +35,77 @@ func (fi fileInfo) Path() string {
 	return fi.path
 }
 
-//Ограничить глубину поиска заданым числом, по SIGUSR2 увеличить глубину поиска на +2
-func ListDirectory(cancelCtx context.Context, userChan chan struct{}, dir string, depth int) ([]FileInfo, error) {
+func GetLogger() *zap.Logger {
+	config := zap.NewProductionConfig()
+	config.OutputPaths = []string{"debug.log"}
+	config.Level = zap.NewAtomicLevelAt(zapcore.DebugLevel)
+	logger, _ := config.Build()
+	logger = logger.With(zap.String("goos", runtime.GOOS))
+	return logger
+}
+
+func ListDirectory(logger *zap.Logger, cancelCtx context.Context, userChan chan struct{}, dir string, depth int) ([]FileInfo, error) {
+	logger.With(
+		zap.String("time", time.Now().String()),
+		zap.String("dir", dir),
+	).Debug("ListDirectory, call")
+
 	select {
 	case <-cancelCtx.Done():
+		logger.With(
+			zap.String("time", time.Now().String()),
+		).Debug("Context closed")
 		return nil, nil
 	case <-userChan:
-		fmt.Println(dir)
-		fmt.Println(depth)
+		logger.With(
+			zap.String("time", time.Now().String()),
+			zap.String("dir", dir),
+			zap.String("depth", dir),
+		).Debug("processing User signal")
 	}
 
-	//По SIGUSR1 вывести текущую директорию и текущую глубину поиска
-	time.Sleep(time.Second * 10)
+	time.Sleep(time.Second * 2)
 	var result []FileInfo
-	res, err := ioutil.ReadDir(dir)
+	res, err := os.ReadDir(dir)
+	logger.With(
+		zap.String("time", time.Now().String()),
+	).Debug("Found file ...")
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range res {
+		fmt.Println(entry.Name())
 		path := filepath.Join(dir, entry.Name())
+		logger.With(
+			zap.String("time", time.Now().String()),
+			zap.String("path", path),
+		).Debug("Found file ...")
 		if entry.IsDir() {
 			depth++
-			child, err := ListDirectory(cancelCtx, userChan, path, depth) //Дополнительно: вынести в горутину
+			child, err := ListDirectory(logger, cancelCtx, userChan, path, depth) //Дополнительно: вынести в горутину
 			if err != nil {
 				return nil, err
 			}
 			result = append(result, child...)
 		} else {
-			result = append(result, fileInfo{entry, path})
+			info, _ := entry.Info()
+			result = append(result, fileInfo{info, path})
 		}
 	}
 	return result, nil
 }
 
-func FindFiles(cancelCtx context.Context, userChan chan struct{}, ext string) (FileList, error) {
+func FindFiles(logger *zap.Logger, cancelCtx context.Context, userChan chan struct{}, ext string) (FileList, error) {
 	wd, err := os.Getwd()
+	logger.With(
+		zap.String("time", time.Now().String()),
+		zap.String("dir", wd),
+	).Debug("FindFiles, call")
+
 	if err != nil {
 		return nil, err
 	}
-	files, err := ListDirectory(cancelCtx, userChan, wd, 1)
+	files, err := ListDirectory(logger, cancelCtx, userChan, wd, 1)
 	if err != nil {
 		return nil, err
 	}
@@ -90,6 +122,16 @@ func FindFiles(cancelCtx context.Context, userChan chan struct{}, ext string) (F
 }
 
 func main() {
+	logger := GetLogger()
+	defer func(logger *zap.Logger) {
+		err := logger.Sync()
+		if err != nil {
+			logger.With(
+				zap.String("time", time.Now().String()),
+			).Warn("Logger is not sync" + err.Error())
+		}
+	}(logger)
+
 	const wantExt = ".go"
 	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -97,16 +139,15 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	sigUserCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	signal.Notify(sigUserCh, syscall.SIGUSR1)
+	signal.Notify(sigUserCh, syscall.SIGTERM)
 
 	//Обработать сигнал SIGUSR1
 	waitCh := make(chan struct{})
 	userCh := make(chan struct{})
 	go func() {
-		res, err := FindFiles(ctx, userCh, wantExt)
+		res, err := FindFiles(logger, ctx, userCh, wantExt)
 		if err != nil {
-			log.Printf("Error on search: %v\n", err)
-			os.Exit(1)
+			logger.Fatal(err.Error())
 		}
 		for _, f := range res {
 			fmt.Printf("\tName: %s\t\t Path: %s\n", f.Name, f.Path)
@@ -116,13 +157,20 @@ func main() {
 	go func() {
 		select {
 		case <-sigCh:
-			log.Println("Signal received, terminate...")
+			logger.With(
+				zap.String("time", time.Now().String()),
+			).Debug("Signal received, terminate...")
 			cancel()
 		case <-sigUserCh:
+			logger.With(
+				zap.String("time", time.Now().String()),
+			).Debug("Received user signal...")
 			userCh <- struct{}{}
 		}
 	}()
 	//Дополнительно: Ожидание всех горутин перед завершением
 	<-waitCh
-	log.Println("Done")
+	logger.With(
+		zap.String("time", time.Now().String()),
+	).Debug("Done")
 }
