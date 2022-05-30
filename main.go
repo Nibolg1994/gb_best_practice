@@ -45,41 +45,52 @@ func GetLogger() *zap.Logger {
 }
 
 func ListDirectory(logger *zap.Logger, cancelCtx context.Context, userChan chan struct{}, dir string, depth int) ([]FileInfo, error) {
-	logger.With(
-		zap.String("time", time.Now().String()),
-		zap.String("dir", dir),
-	).Debug("ListDirectory, call")
 
-	select {
-	case <-cancelCtx.Done():
-		logger.With(
-			zap.String("time", time.Now().String()),
-		).Debug("Context closed")
-		return nil, nil
-	case <-userChan:
+	if logger != nil {
 		logger.With(
 			zap.String("time", time.Now().String()),
 			zap.String("dir", dir),
-			zap.String("depth", dir),
-		).Debug("processing User signal")
+		).Debug("ListDirectory, call")
+	}
+
+	select {
+	case <-cancelCtx.Done():
+		if logger != nil {
+			logger.With(
+				zap.String("time", time.Now().String()),
+			).Debug("Context closed")
+		}
+		return nil, nil
+	case <-userChan:
+		if logger != nil {
+			logger.With(
+				zap.String("time", time.Now().String()),
+				zap.String("dir", dir),
+				zap.String("depth", dir),
+			).Debug("processing User signal")
+		}
 	}
 
 	time.Sleep(time.Second * 2)
 	var result []FileInfo
 	res, err := os.ReadDir(dir)
-	logger.With(
-		zap.String("time", time.Now().String()),
-	).Debug("Found file ...")
+	if logger != nil {
+		logger.With(
+			zap.String("time", time.Now().String()),
+		).Debug("Found file ...")
+	}
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range res {
 		fmt.Println(entry.Name())
 		path := filepath.Join(dir, entry.Name())
-		logger.With(
-			zap.String("time", time.Now().String()),
-			zap.String("path", path),
-		).Debug("Found file ...")
+		if logger != nil {
+			logger.With(
+				zap.String("time", time.Now().String()),
+				zap.String("path", path),
+			).Debug("Found file ...")
+		}
 		if entry.IsDir() {
 			depth++
 			child, err := ListDirectory(logger, cancelCtx, userChan, path, depth) //Дополнительно: вынести в горутину
